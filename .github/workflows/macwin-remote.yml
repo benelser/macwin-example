@@ -5,11 +5,17 @@
 #      release, runs it on the matching native runner, captures
 #      stdout/stderr/exit, uploads as `macwin-result`. Driven by `macwin run
 #      --runner github-actions`.
-#   2. **Debug** (`debug=true`): brings up Tailscale + OpenSSH on the runner
-#      and holds the job open until `C:\macwin-release` (Windows) or
-#      `/macwin-release` (POSIX) appears. Driven by `macwin debug start`.
-#      The debug session lets the user SSH in and iterate against a real
-#      `windows-11-arm` host from a Mac.
+#   2. **Debug** (`debug=true`): swappable backend × relay model. The release
+#      tag carries `macwin-tunnel-runner.exe` (a thin bore-client wrapper)
+#      that the runner runs with env vars from `debug_runner_env`. macwin
+#      parses the runner's stdout for `MACWIN_TUNNEL_ENDPOINT=<host>:<port>`
+#      and SSHes into the runner via that endpoint. Holds open until
+#      `C:\macwin-release` appears.
+#
+# The debug-mode wiring is relay-agnostic: BoreRelay sets MACWIN_TUNNEL_HOST,
+# DirectRelay leaves env empty (and uses no tunnel-runner binary), TailscaleRelay
+# wires the action separately. The workflow itself only knows "download a
+# binary, set env, run, hold open" — the relay choice lives in macwin's config.
 #
 # Adding a target = adding a job. The `if:` gate routes inputs.target to one
 # job at a time.
@@ -20,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: "Ephemeral release tag carrying the prebuilt binary (one-shot mode only)"
+        description: "Ephemeral release tag carrying the prebuilt binary (one-shot or tunnel-runner)"
         required: false
         default: ""
       target:
@@ -34,12 +40,16 @@ on:
         description: "Hold runner open for interactive SSH debug"
         required: false
         default: "false"
-      debug_hostname:
-        description: "Tailscale hostname for the debug runner (debug mode)"
-        required: false
-        default: ""
       debug_pubkey:
         description: "SSH public key authorized for runneradmin (debug mode)"
+        required: false
+        default: ""
+      debug_runner_args:
+        description: "Args macwin-tunnel-runner is invoked with (debug mode)"
+        required: false
+        default: ""
+      debug_runner_env:
+        description: "newline-separated KEY=VALUE pairs exported before invoking the tunnel runner"
         required: false
         default: ""
 
@@ -49,45 +59,81 @@ jobs:
     runs-on: windows-11-arm
     timeout-minutes: 30  # safety net so a forgotten debug session can't run forever
     steps:
-      # ----- Debug-mode path: bring up Tailscale + OpenSSH, hold open -----
-      - name: Tailscale up (debug)
-        if: ${{ inputs.debug == 'true' }}
-        uses: tailscale/github-action@v3
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci
-          hostname: ${{ inputs.debug_hostname }}
-
+      # ----- Debug-mode path: install OpenSSH, run tunnel-runner, hold open -----
       - name: Install OpenSSH server (debug)
         if: ${{ inputs.debug == 'true' }}
         shell: pwsh
         run: |
-          # Capability install is idempotent; SetEnabled handles re-runs.
           Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
           Set-Service -Name sshd -StartupType Automatic
           Start-Service sshd
 
-          # The runneradmin user is in Administrators, so use
+          # runneradmin is in Administrators → must use
           # administrators_authorized_keys per Microsoft's OpenSSH config.
           $sshDir = Join-Path $env:ProgramData "ssh"
           New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
           $keyFile = Join-Path $sshDir "administrators_authorized_keys"
           "${{ inputs.debug_pubkey }}" | Out-File -Encoding ASCII -FilePath $keyFile
-
-          # OpenSSH refuses keys with permissive ACLs.
           icacls $keyFile /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" | Out-Null
+
+      - name: Download tunnel-runner from release (debug)
+        if: ${{ inputs.debug == 'true' && inputs.release != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          New-Item -ItemType Directory -Force -Path tunnel | Out-Null
+          # The tunnel-runner asset is a Win .exe; the one-shot path uses the
+          # same flag pattern, so we filter on filename.
+          gh release download "${{ inputs.release }}" --pattern '*macwin-tunnel-runner*.exe' --dir tunnel
+
+      - name: Start tunnel-runner (debug)
+        if: ${{ inputs.debug == 'true' && inputs.release != '' }}
+        shell: pwsh
+        run: |
+          # Fan out the env-vars blob into actual env vars.
+          $envText = @"
+          ${{ inputs.debug_runner_env }}
+          "@
+          foreach ($line in $envText -split "`n") {
+            $line = $line.Trim()
+            if ($line -eq "") { continue }
+            $eq = $line.IndexOf('=')
+            if ($eq -lt 0) { continue }
+            $k = $line.Substring(0, $eq)
+            $v = $line.Substring($eq + 1)
+            [Environment]::SetEnvironmentVariable($k, $v, 'Process')
+          }
+          # Find the runner binary.
+          $exe = Get-ChildItem tunnel\*.exe | Select-Object -First 1
+          if (-not $exe) { Write-Error "tunnel-runner exe missing"; exit 1 }
+          # Background-launch and capture stdout — the announcement line
+          # (MACWIN_TUNNEL_ENDPOINT=...) needs to make it into the workflow log.
+          $args = "${{ inputs.debug_runner_args }}"
+          Start-Process -FilePath $exe.FullName -ArgumentList $args `
+            -PassThru -NoNewWindow -RedirectStandardOutput tunnel-runner.log `
+            -RedirectStandardError tunnel-runner.err | Out-Null
+          # Wait for the announcement line so macwin's poller can pick it up
+          # via gh run view --log without needing a side channel.
+          $deadline = (Get-Date).AddMinutes(2)
+          while ((Get-Date) -lt $deadline) {
+            if (Test-Path tunnel-runner.log) {
+              $content = Get-Content tunnel-runner.log -ErrorAction SilentlyContinue
+              if ($content -match "MACWIN_TUNNEL_ENDPOINT=") {
+                Write-Host ($content -join "`n")
+                break
+              }
+            }
+            Start-Sleep -Seconds 2
+          }
 
       - name: Hold runner open (debug)
         if: ${{ inputs.debug == 'true' }}
         shell: pwsh
         run: |
           Write-Host "═══ macwin debug runner ready ═══"
-          Write-Host "Tailscale hostname: ${{ inputs.debug_hostname }}"
-          Write-Host "SSH user:           runneradmin"
-          Write-Host ""
           Write-Host "Waiting for release sentinel at C:\macwin-release..."
-          Write-Host "(timeout-minutes=30 enforces an upper bound)"
           $deadline = (Get-Date).AddMinutes(28)
           while (-not (Test-Path C:\macwin-release)) {
             if ((Get-Date) -gt $deadline) {
