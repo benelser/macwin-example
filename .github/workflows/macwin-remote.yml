@@ -59,6 +59,12 @@ jobs:
     runs-on: windows-11-arm
     timeout-minutes: 30  # safety net so a forgotten debug session can't run forever
     steps:
+      # In debug mode, check out the source so the SSH'd-in user can
+      # build/test/iterate against this repo's code on the runner.
+      - name: Checkout source (debug)
+        if: ${{ inputs.debug == 'true' }}
+        uses: actions/checkout@v4
+
       # ----- Debug-mode path: download tunnel-runner (which embeds its own
       #       russh-based SSH server + bore client), hold open. No
       #       Add-WindowsCapability dance — macwin owns the entire stack.
@@ -142,10 +148,13 @@ jobs:
           # Publish the announcement to the ephemeral release's body so macwin
           # can poll for it via the public GitHub REST API (gh's live-log API
           # doesn't return logs for in-progress jobs).
-          $endpoint = ((Get-Content tunnel-runner.log) | Select-String "MACWIN_TUNNEL_ENDPOINT=" |
-                       Select-Object -First 1) -replace "^.*?(MACWIN_TUNNEL_ENDPOINT=.*)$", '$1'
-          Write-Host "Publishing $endpoint to release body for macwin polling..."
-          gh release edit "${{ inputs.release }}" --notes "$endpoint" 2>&1 | Write-Host
+          $line = (Get-Content tunnel-runner.log | Where-Object { $_ -match "MACWIN_TUNNEL_ENDPOINT=" } | Select-Object -First 1)
+          $endpoint = ($line -split " " | Where-Object { $_ -like "MACWIN_TUNNEL_ENDPOINT=*" } | Select-Object -First 1)
+          if (-not $endpoint) { $endpoint = $line.Trim() }
+          Write-Host "Publishing endpoint to release body: $endpoint"
+          $editOut = gh release edit "${{ inputs.release }}" --notes "$endpoint" --repo "${{ github.repository }}" 2>&1
+          Write-Host "gh release edit exit: $LASTEXITCODE"
+          Write-Host "gh release edit output: $editOut"
 
           # Hold open until release sentinel or auto-timeout. The tunnel-runner
           # process stays alive for the duration since it's a child of THIS
