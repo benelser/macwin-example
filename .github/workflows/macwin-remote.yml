@@ -237,8 +237,78 @@ jobs:
   linux-arm:
     if: ${{ inputs.target == 'linux-arm' || inputs.target == 'linux-arm-musl' }}
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
     steps:
+      - name: Checkout source (debug)
+        if: ${{ inputs.debug == 'true' }}
+        uses: actions/checkout@v4
+
+      - name: Download tunnel-runner from release (debug)
+        if: ${{ inputs.debug == 'true' && inputs.release != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p tunnel
+          gh release download "${{ inputs.release }}" --pattern '*macwin-tunnel-runner*' --dir tunnel
+          chmod +x tunnel/macwin-tunnel-runner
+
+      - name: Run tunnel-runner + hold open (debug)
+        if: ${{ inputs.debug == 'true' && inputs.release != '' }}
+        env:
+          MACWIN_TUNNEL_SECRET: ${{ secrets.MACWIN_TUNNEL_SECRET }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -e
+          # Fan out env-vars blob → real env (newline-separated KEY=VALUE).
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            export "$line"
+          done <<EOF_ENV
+          ${{ inputs.debug_runner_env }}
+          EOF_ENV
+
+          # Background-launch tunnel-runner, capture stdout/stderr to a file.
+          ./tunnel/macwin-tunnel-runner > tunnel-runner.log 2> tunnel-runner.err &
+          TR_PID=$!
+          echo "tunnel-runner pid: $TR_PID"
+
+          # Wait for announcement.
+          deadline=$(($(date +%s) + 120))
+          while [ $(date +%s) -lt $deadline ]; do
+            if grep -q "MACWIN_TUNNEL_ENDPOINT=" tunnel-runner.log 2>/dev/null; then
+              echo "═══ tunnel-runner announcement ═══"
+              cat tunnel-runner.log
+              echo "═══════════════════════════════════"
+              break
+            fi
+            sleep 2
+          done
+          ENDPOINT=$(grep "MACWIN_TUNNEL_ENDPOINT=" tunnel-runner.log | head -1 | tr -d '\r')
+          if [ -z "$ENDPOINT" ]; then
+            echo "tunnel-runner did not announce — logs follow:"
+            cat tunnel-runner.log tunnel-runner.err
+            exit 1
+          fi
+          gh release edit "${{ inputs.release }}" --notes "$ENDPOINT" --repo "${{ github.repository }}" || true
+
+          echo "═══ macwin debug runner ready ═══"
+          echo "Waiting for release sentinel at /tmp/macwin-release..."
+          deadline=$(($(date +%s) + 26*60))
+          while [ ! -f /tmp/macwin-release ]; do
+            if [ $(date +%s) -gt $deadline ]; then
+              echo "Auto-release after 26 minutes."
+              break
+            fi
+            sleep 30
+          done
+          echo "Releasing runner."
+          kill $TR_PID 2>/dev/null || true
+
+      # ----- One-shot path -----
       - name: Download binary from release
+        if: ${{ inputs.debug != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -246,13 +316,14 @@ jobs:
           mkdir -p bin
           gh release download "${{ inputs.release }}" --dir bin
       - name: Run + capture
+        if: ${{ inputs.debug != 'true' }}
         run: |
           BIN=$(ls bin/* | head -1)
           chmod +x "$BIN"
           "$BIN" ${{ inputs.args }} >stdout.log 2>stderr.log
           echo "exit=$?" > exit.txt
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: ${{ inputs.debug != 'true' && always() }}
         with:
           name: macwin-result
           path: |
@@ -289,8 +360,75 @@ jobs:
   mac-arm:
     if: ${{ inputs.target == 'mac-arm' }}
     runs-on: macos-14
+    timeout-minutes: 30
     steps:
+      - name: Checkout source (debug)
+        if: ${{ inputs.debug == 'true' }}
+        uses: actions/checkout@v4
+
+      - name: Download tunnel-runner from release (debug)
+        if: ${{ inputs.debug == 'true' && inputs.release != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p tunnel
+          gh release download "${{ inputs.release }}" --pattern '*macwin-tunnel-runner*' --dir tunnel
+          chmod +x tunnel/macwin-tunnel-runner
+
+      - name: Run tunnel-runner + hold open (debug)
+        if: ${{ inputs.debug == 'true' && inputs.release != '' }}
+        env:
+          MACWIN_TUNNEL_SECRET: ${{ secrets.MACWIN_TUNNEL_SECRET }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -e
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            export "$line"
+          done <<EOF_ENV
+          ${{ inputs.debug_runner_env }}
+          EOF_ENV
+
+          ./tunnel/macwin-tunnel-runner > tunnel-runner.log 2> tunnel-runner.err &
+          TR_PID=$!
+          echo "tunnel-runner pid: $TR_PID"
+
+          deadline=$(($(date +%s) + 120))
+          while [ $(date +%s) -lt $deadline ]; do
+            if grep -q "MACWIN_TUNNEL_ENDPOINT=" tunnel-runner.log 2>/dev/null; then
+              echo "═══ tunnel-runner announcement ═══"
+              cat tunnel-runner.log
+              echo "═══════════════════════════════════"
+              break
+            fi
+            sleep 2
+          done
+          ENDPOINT=$(grep "MACWIN_TUNNEL_ENDPOINT=" tunnel-runner.log | head -1 | tr -d '\r')
+          if [ -z "$ENDPOINT" ]; then
+            echo "tunnel-runner did not announce — logs follow:"
+            cat tunnel-runner.log tunnel-runner.err
+            exit 1
+          fi
+          gh release edit "${{ inputs.release }}" --notes "$ENDPOINT" --repo "${{ github.repository }}" || true
+
+          echo "═══ macwin debug runner ready ═══"
+          echo "Waiting for release sentinel at /tmp/macwin-release..."
+          deadline=$(($(date +%s) + 26*60))
+          while [ ! -f /tmp/macwin-release ]; do
+            if [ $(date +%s) -gt $deadline ]; then
+              echo "Auto-release after 26 minutes."
+              break
+            fi
+            sleep 30
+          done
+          echo "Releasing runner."
+          kill $TR_PID 2>/dev/null || true
+
+      # ----- One-shot path -----
       - name: Download binary from release
+        if: ${{ inputs.debug != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -298,13 +436,14 @@ jobs:
           mkdir -p bin
           gh release download "${{ inputs.release }}" --dir bin
       - name: Run + capture
+        if: ${{ inputs.debug != 'true' }}
         run: |
           BIN=$(ls bin/* | head -1)
           chmod +x "$BIN"
           "$BIN" ${{ inputs.args }} >stdout.log 2>stderr.log
           echo "exit=$?" > exit.txt
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: ${{ inputs.debug != 'true' && always() }}
         with:
           name: macwin-result
           path: |
