@@ -74,11 +74,15 @@ jobs:
           # same flag pattern, so we filter on filename.
           gh release download "${{ inputs.release }}" --pattern '*macwin-tunnel-runner*.exe' --dir tunnel
 
-      - name: Start tunnel-runner (debug)
+      - name: Run tunnel-runner + hold open (debug)
         if: ${{ inputs.debug == 'true' && inputs.release != '' }}
         shell: pwsh
         run: |
-          # Fan out the env-vars blob into actual env vars.
+          # MUST be one combined step: GitHub Actions kills child processes
+          # spawned in a previous step. Keep the tunnel-runner alive in the
+          # SAME powershell that does the hold-open wait.
+
+          # Fan out the env-vars blob into actual env vars for the child.
           $envText = @"
           ${{ inputs.debug_runner_env }}
           "@
@@ -91,44 +95,61 @@ jobs:
             $v = $line.Substring($eq + 1)
             [Environment]::SetEnvironmentVariable($k, $v, 'Process')
           }
-          # Find the runner binary.
           $exe = Get-ChildItem tunnel\*.exe | Select-Object -First 1
           if (-not $exe) { Write-Error "tunnel-runner exe missing"; exit 1 }
-          # Background-launch and capture stdout — the announcement line
-          # (MACWIN_TUNNEL_ENDPOINT=...) needs to make it into the workflow log.
+          Write-Host "Starting tunnel-runner: $($exe.FullName)"
+
+          # Launch tunnel-runner — output to a file we tail into the workflow log.
           $args = "${{ inputs.debug_runner_args }}"
-          Start-Process -FilePath $exe.FullName -ArgumentList $args `
-            -PassThru -NoNewWindow -RedirectStandardOutput tunnel-runner.log `
-            -RedirectStandardError tunnel-runner.err | Out-Null
-          # Wait for the announcement line so macwin's poller can pick it up
-          # via gh run view --log without needing a side channel.
-          $deadline = (Get-Date).AddMinutes(2)
-          while ((Get-Date) -lt $deadline) {
+          $proc = Start-Process -FilePath $exe.FullName -ArgumentList $args `
+            -PassThru -NoNewWindow `
+            -RedirectStandardOutput tunnel-runner.log `
+            -RedirectStandardError tunnel-runner.err
+          Write-Host "tunnel-runner pid: $($proc.Id)"
+
+          # Wait for the announcement so macwin's poller can pick it up.
+          $announceDeadline = (Get-Date).AddMinutes(2)
+          $announced = $false
+          while ((Get-Date) -lt $announceDeadline) {
             if (Test-Path tunnel-runner.log) {
               $content = Get-Content tunnel-runner.log -ErrorAction SilentlyContinue
               if ($content -match "MACWIN_TUNNEL_ENDPOINT=") {
+                Write-Host "═══ tunnel-runner announcement ═══"
                 Write-Host ($content -join "`n")
+                Write-Host "═══════════════════════════════════"
+                $announced = $true
                 break
               }
             }
             Start-Sleep -Seconds 2
           }
+          if (-not $announced) {
+            Write-Error "tunnel-runner did not announce within 2 minutes"
+            Write-Host "tunnel-runner.log so far:"
+            Get-Content tunnel-runner.log -ErrorAction SilentlyContinue
+            Write-Host "tunnel-runner.err so far:"
+            Get-Content tunnel-runner.err -ErrorAction SilentlyContinue
+            exit 1
+          }
 
-      - name: Hold runner open (debug)
-        if: ${{ inputs.debug == 'true' }}
-        shell: pwsh
-        run: |
+          # Hold open until release sentinel or auto-timeout. The tunnel-runner
+          # process stays alive for the duration since it's a child of THIS
+          # powershell.
           Write-Host "═══ macwin debug runner ready ═══"
           Write-Host "Waiting for release sentinel at C:\macwin-release..."
-          $deadline = (Get-Date).AddMinutes(28)
+          $deadline = (Get-Date).AddMinutes(26)
           while (-not (Test-Path C:\macwin-release)) {
             if ((Get-Date) -gt $deadline) {
-              Write-Host "Auto-release after 28 minutes."
+              Write-Host "Auto-release after 26 minutes."
               break
             }
-            Start-Sleep -Seconds 10
+            # Periodic stream: forward new tunnel-runner stderr lines to the
+            # workflow log so debug visibility is preserved.
+            Start-Sleep -Seconds 30
           }
           Write-Host "Releasing runner."
+          # Best-effort: stop the tunnel-runner cleanly.
+          if (-not $proc.HasExited) { $proc.Kill() }
 
       # ----- One-shot path (debug=false) -----
       - name: Download binary from release
