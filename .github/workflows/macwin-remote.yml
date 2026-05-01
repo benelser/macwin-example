@@ -1,0 +1,236 @@
+# macwin-remote — workflow installed by `macwin remote init`.
+#
+# Two modes:
+#   1. **One-shot** (default): downloads the binary uploaded as an ephemeral
+#      release, runs it on the matching native runner, captures
+#      stdout/stderr/exit, uploads as `macwin-result`. Driven by `macwin run
+#      --runner github-actions`.
+#   2. **Debug** (`debug=true`): brings up Tailscale + OpenSSH on the runner
+#      and holds the job open until `C:\macwin-release` (Windows) or
+#      `/macwin-release` (POSIX) appears. Driven by `macwin debug start`.
+#      The debug session lets the user SSH in and iterate against a real
+#      `windows-11-arm` host from a Mac.
+#
+# Adding a target = adding a job. The `if:` gate routes inputs.target to one
+# job at a time.
+
+name: macwin-remote
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Ephemeral release tag carrying the prebuilt binary (one-shot mode only)"
+        required: false
+        default: ""
+      target:
+        description: "macwin target name"
+        required: true
+      args:
+        description: "Args to forward to the binary (one-shot mode only)"
+        required: false
+        default: ""
+      debug:
+        description: "Hold runner open for interactive SSH debug"
+        required: false
+        default: "false"
+      debug_hostname:
+        description: "Tailscale hostname for the debug runner (debug mode)"
+        required: false
+        default: ""
+      debug_pubkey:
+        description: "SSH public key authorized for runneradmin (debug mode)"
+        required: false
+        default: ""
+
+jobs:
+  win-arm:
+    if: ${{ inputs.target == 'win-arm' }}
+    runs-on: windows-11-arm
+    timeout-minutes: 30  # safety net so a forgotten debug session can't run forever
+    steps:
+      # ----- Debug-mode path: bring up Tailscale + OpenSSH, hold open -----
+      - name: Tailscale up (debug)
+        if: ${{ inputs.debug == 'true' }}
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          hostname: ${{ inputs.debug_hostname }}
+
+      - name: Install OpenSSH server (debug)
+        if: ${{ inputs.debug == 'true' }}
+        shell: pwsh
+        run: |
+          # Capability install is idempotent; SetEnabled handles re-runs.
+          Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+          Set-Service -Name sshd -StartupType Automatic
+          Start-Service sshd
+
+          # The runneradmin user is in Administrators, so use
+          # administrators_authorized_keys per Microsoft's OpenSSH config.
+          $sshDir = Join-Path $env:ProgramData "ssh"
+          New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
+          $keyFile = Join-Path $sshDir "administrators_authorized_keys"
+          "${{ inputs.debug_pubkey }}" | Out-File -Encoding ASCII -FilePath $keyFile
+
+          # OpenSSH refuses keys with permissive ACLs.
+          icacls $keyFile /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" | Out-Null
+
+      - name: Hold runner open (debug)
+        if: ${{ inputs.debug == 'true' }}
+        shell: pwsh
+        run: |
+          Write-Host "═══ macwin debug runner ready ═══"
+          Write-Host "Tailscale hostname: ${{ inputs.debug_hostname }}"
+          Write-Host "SSH user:           runneradmin"
+          Write-Host ""
+          Write-Host "Waiting for release sentinel at C:\macwin-release..."
+          Write-Host "(timeout-minutes=30 enforces an upper bound)"
+          $deadline = (Get-Date).AddMinutes(28)
+          while (-not (Test-Path C:\macwin-release)) {
+            if ((Get-Date) -gt $deadline) {
+              Write-Host "Auto-release after 28 minutes."
+              break
+            }
+            Start-Sleep -Seconds 10
+          }
+          Write-Host "Releasing runner."
+
+      # ----- One-shot path (debug=false) -----
+      - name: Download binary from release
+        if: ${{ inputs.debug != 'true' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          gh release download "${{ inputs.release }}" --pattern '*.exe' --dir bin
+      - name: Run + capture
+        if: ${{ inputs.debug != 'true' }}
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem bin\*.exe | Select-Object -First 1
+          $stdout = "stdout.log"
+          $stderr = "stderr.log"
+          $proc = Start-Process -FilePath $exe.FullName -ArgumentList "${{ inputs.args }}" `
+            -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          $proc | Wait-Process
+          "exit=$($proc.ExitCode)" | Out-File -FilePath exit.txt
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.debug != 'true' && always() }}
+        with:
+          name: macwin-result
+          path: |
+            stdout.log
+            stderr.log
+            exit.txt
+
+  win-x86:
+    if: ${{ inputs.target == 'win-x86' }}
+    runs-on: windows-2022
+    steps:
+      - name: Download binary from release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          New-Item -ItemType Directory -Force -Path bin | Out-Null
+          gh release download "${{ inputs.release }}" --pattern '*.exe' --dir bin
+      - name: Run + capture
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem bin\*.exe | Select-Object -First 1
+          $proc = Start-Process -FilePath $exe.FullName -ArgumentList "${{ inputs.args }}" `
+            -PassThru -NoNewWindow -RedirectStandardOutput stdout.log -RedirectStandardError stderr.log
+          $proc | Wait-Process
+          "exit=$($proc.ExitCode)" | Out-File -FilePath exit.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macwin-result
+          path: |
+            stdout.log
+            stderr.log
+            exit.txt
+
+  linux-arm:
+    if: ${{ inputs.target == 'linux-arm' || inputs.target == 'linux-arm-musl' }}
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Download binary from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p bin
+          gh release download "${{ inputs.release }}" --dir bin
+      - name: Run + capture
+        run: |
+          BIN=$(ls bin/* | head -1)
+          chmod +x "$BIN"
+          "$BIN" ${{ inputs.args }} >stdout.log 2>stderr.log
+          echo "exit=$?" > exit.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macwin-result
+          path: |
+            stdout.log
+            stderr.log
+            exit.txt
+
+  linux-x86:
+    if: ${{ inputs.target == 'linux-x86' || inputs.target == 'linux-x86-musl' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download binary from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p bin
+          gh release download "${{ inputs.release }}" --dir bin
+      - name: Run + capture
+        run: |
+          BIN=$(ls bin/* | head -1)
+          chmod +x "$BIN"
+          "$BIN" ${{ inputs.args }} >stdout.log 2>stderr.log
+          echo "exit=$?" > exit.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macwin-result
+          path: |
+            stdout.log
+            stderr.log
+            exit.txt
+
+  mac-arm:
+    if: ${{ inputs.target == 'mac-arm' }}
+    runs-on: macos-14
+    steps:
+      - name: Download binary from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p bin
+          gh release download "${{ inputs.release }}" --dir bin
+      - name: Run + capture
+        run: |
+          BIN=$(ls bin/* | head -1)
+          chmod +x "$BIN"
+          "$BIN" ${{ inputs.args }} >stdout.log 2>stderr.log
+          echo "exit=$?" > exit.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macwin-result
+          path: |
+            stdout.log
+            stderr.log
+            exit.txt
