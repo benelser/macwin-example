@@ -1,17 +1,17 @@
 [package]
-name = "macwin-debug-mvp"
+name = "macwin-example"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.94"
 license = "MIT"
-description = "macwin-debug-mvp — cross-platform IPC daemon scaffolded by macwin"
+description = "macwin-example — cross-platform IPC daemon scaffolded by macwin"
 
 [[bin]]
-name = "macwin-debug-mvp"
+name = "macwin-example"
 path = "src/main.rs"
 
 [lib]
-name = "macwin_debug_mvp"
+name = "macwin_example"
 path = "src/lib.rs"
 
 [dependencies]

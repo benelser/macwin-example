@@ -5,13 +5,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use macwin_debug_mvp::{info, send_recv, serve_one};
+use macwin_example::{info, send_recv, serve_one};
 
 fn unique_id(label: &str) -> String {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
-    format!("macwin-debug-mvp-{label}-{pid}-{n}")
+    format!("macwin-example-{label}-{pid}-{n}")
 }
 
 fn spawn_server(id: &str) -> thread::JoinHandle<io::Result<()>> {

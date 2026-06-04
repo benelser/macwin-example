@@ -1,4 +1,4 @@
-# macwin-debug-mvp
+# macwin-example
 
 An example consumer project for **[macwin](https://github.com/benelser/macwin)** —
 the CLI that lets an Apple Silicon developer build, run, and debug Rust on every

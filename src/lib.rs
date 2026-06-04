@@ -1,4 +1,4 @@
-//! Cross-platform IPC for macwin-debug-mvp.
+//! Cross-platform IPC for macwin-example.
 //!
 //! On **Windows** this becomes a named pipe at `\\.\pipe\<id>`.
 //! On **macOS / Linux** it's a Unix domain socket via the system namespace.
@@ -47,7 +47,7 @@ pub fn send_recv(id: &str, message: &str) -> Result<String, std::io::Error> {
 
 pub fn info() -> String {
     format!(
-        "macwin-debug-mvp {} • {}-{} • {} • ipc={}",
+        "macwin-example {} • {}-{} • {} • ipc={}",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn info_well_formed() {
         let s = info();
-        assert!(s.starts_with("macwin-debug-mvp "));
+        assert!(s.starts_with("macwin-example "));
         assert!(s.contains("ipc="));
     }
 }
