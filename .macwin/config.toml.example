@@ -1,0 +1,32 @@
+# macwin config — example template.
+#
+# Copy this to `.macwin/config.toml` to enable `macwin debug` (the interactive
+# remote-debug session). You only need config for `macwin debug`; local
+# run/smoke/watch and `macwin run --runner github-actions` work with no config.
+#
+# macwin reads config in this order (highest precedence first):
+#   1. CLI flags
+#   2. env vars (MACWIN_TUNNEL_HOST, MACWIN_TUNNEL_SECRET, ...)
+#   3. <repo>/.macwin/config.toml   (checked in — DO NOT put secrets here)
+#   4. ~/.config/macwin/config.toml (per-user — the right place for secrets)
+
+[debug.relay]
+kind = "bore"
+
+# Your bring-your-own bore relay. Stand one up with `macwin relay init` plus
+# deploy/bore-server/deploy.sh — see the relay self-hosting guide:
+#   https://github.com/benelser/macwin/blob/main/docs/src/guides/relay-self-hosting.md
+server = "relay.example.com"
+control_port = 7835
+discovery_port = 7800
+
+# TLS discovery (optional): if your relay serves HTTPS (a reverse proxy, or a
+# platform like Cloud Run that terminates TLS for you), set the full base URL
+# instead of host + discovery_port:
+# discovery_url = "https://relay.example.com"
+
+# Secret — DO NOT commit a real secret in this checked-in file. Provide it
+# out-of-band instead:
+#   export MACWIN_TUNNEL_SECRET=...        # preferred
+# or store it in your per-user ~/.config/macwin/config.toml, which
+# `macwin relay init --host <h> --write` manages for you.

@@ -60,10 +60,23 @@ macwin relay init                                    # generate a secret + confi
 macwin debug start --target win-arm                  # interactive shell on a Windows runner
 ```
 
+Config lives in `.macwin/config.toml`. This repo ships a documented template at
+[`.macwin/config.toml.example`](.macwin/config.toml.example) — copy it and fill
+in your relay:
+
+```bash
+cp .macwin/config.toml.example .macwin/config.toml   # then set server + MACWIN_TUNNEL_SECRET
+```
+
+Keep the secret out of the checked-in file — provide it via `MACWIN_TUNNEL_SECRET`
+or your per-user `~/.config/macwin/config.toml`. The real `.macwin/config.toml` is
+gitignored here for that reason.
+
 ## Project shape
 
 - `src/lib.rs` — IPC primitives (`serve_one`, `send_recv`, `info`)
 - `src/main.rs` — CLI: `info`, `ipc <message>`
 - `tests/integration.rs` — cross-platform IPC roundtrip tests via [`interprocess`](https://crates.io/crates/interprocess)
 - `.github/workflows/macwin-remote.yml` — the GitHub Actions runner workflow
+- `.macwin/config.toml.example` — template for `macwin debug` relay config
 - `rust-toolchain.toml` — pins the toolchain channel + components macwin uses

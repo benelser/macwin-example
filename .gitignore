@@ -1,3 +1,7 @@
 /target
 .xwin-cache
 *.log
+
+# Real macwin config may hold a relay secret — keep it local.
+# The committed `.macwin/config.toml.example` template stays tracked.
+/.macwin/config.toml
