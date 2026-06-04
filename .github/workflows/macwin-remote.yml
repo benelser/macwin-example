@@ -12,10 +12,10 @@
 #      and SSHes into the runner via that endpoint. Holds open until
 #      `C:\macwin-release` appears.
 #
-# The debug-mode wiring is relay-agnostic: BoreRelay sets MACWIN_TUNNEL_HOST,
-# DirectRelay leaves env empty (and uses no tunnel-runner binary), TailscaleRelay
-# wires the action separately. The workflow itself only knows "download a
-# binary, set env, run, hold open" — the relay choice lives in macwin's config.
+# The debug-mode wiring is relay-agnostic: the bore relay sets MACWIN_TUNNEL_HOST
+# in `debug_runner_env`. The workflow itself only knows "download a binary, set
+# env, run, hold open" — the relay choice lives in macwin's config, so a new
+# relay backend needs no workflow change.
 #
 # Adding a target = adding a job. The `if:` gate routes inputs.target to one
 # job at a time.
